@@ -194,16 +194,10 @@ def get_item_metadata(item_key: str) -> str:
 
 @mcp.tool(description=(
     "Get the full text content of a Zotero item's attachment. "
-    "Only works in local mode (ZOTERO_LOCAL=true). "
+    "Pass the attachment key (not the parent item key). "
     "Returns the extracted text from the PDF or other attachment."
 ))
 def get_item_fulltext(item_key: str) -> str:
-    use_local = os.environ.get("ZOTERO_LOCAL", "false").lower() == "true"
-    if not use_local:
-        return (
-            "Full text extraction requires local Zotero mode. "
-            "Set ZOTERO_LOCAL=true and run the server locally alongside Zotero."
-        )
     try:
         zot = _get_client()
         fulltext = zot.fulltext_item(item_key)
@@ -267,59 +261,85 @@ def get_item_notes(item_key: str) -> str:
         return f"Error fetching notes for '{item_key}': {e}"
 
 
+def _format_annotation(ann: dict) -> str:
+    """Format a single annotation dict into a readable string."""
+    data = ann.get("data", {})
+    ann_type = data.get("annotationType", "unknown")
+    text = data.get("annotationText", "")
+    comment = data.get("annotationComment", "")
+    color = data.get("annotationColor", "")
+    page = data.get("annotationPageLabel", "")
+    key = data.get("key", "")
+
+    parts = [f"[{ann_type}]"]
+    if page:
+        parts.append(f"p.{page}")
+    if color:
+        parts.append(f"({color})")
+    if key:
+        parts.append(f"key:{key}")
+    line = " ".join(parts)
+    if text:
+        line += f"\n  > {text}"
+    if comment:
+        line += f"\n  Comment: {comment}"
+    return line
+
+
 @mcp.tool(description=(
     "Get annotations (highlights and comments) from a Zotero item's PDF attachment. "
-    "Only works in local mode (ZOTERO_LOCAL=true)."
+    "Works with both the web API and local mode. "
+    "Pass either a parent item key or a PDF attachment key."
 ))
 def get_item_annotations(item_key: str) -> str:
-    use_local = os.environ.get("ZOTERO_LOCAL", "false").lower() == "true"
-    if not use_local:
-        return (
-            "Annotation extraction requires local Zotero mode. "
-            "Set ZOTERO_LOCAL=true and run the server locally alongside Zotero."
-        )
     try:
         zot = _get_client()
-        children = zot.children(item_key)
+        item = zot.item(item_key)
+        item_type = item.get("data", {}).get("itemType", "")
 
-        # Find PDF attachment keys
-        pdf_keys = [
-            c["data"]["key"] for c in children
-            if c.get("data", {}).get("contentType") == "application/pdf"
-        ]
-        if not pdf_keys:
-            return f"No PDF attachments found for item '{item_key}'."
+        if item_type == "attachment":
+            # item_key is already a PDF attachment — query its children directly
+            pdf_keys = [item_key]
+        else:
+            # item_key is a parent item — find its PDF attachments
+            children = zot.children(item_key)
+            pdf_keys = [
+                c["data"]["key"] for c in children
+                if c.get("data", {}).get("contentType") == "application/pdf"
+                or c.get("data", {}).get("itemType") == "attachment"
+            ]
+            if not pdf_keys:
+                return f"No PDF attachments found for item '{item_key}'."
 
         all_annotations = []
         for pdf_key in pdf_keys:
             annotations = zot.children(pdf_key)
             for ann in annotations:
-                data = ann.get("data", {})
-                if data.get("itemType") != "annotation":
+                if ann.get("data", {}).get("itemType") != "annotation":
                     continue
-                ann_type = data.get("annotationType", "unknown")
-                text = data.get("annotationText", "")
-                comment = data.get("annotationComment", "")
-                color = data.get("annotationColor", "")
-                page = data.get("annotationPageLabel", "")
-
-                parts = [f"[{ann_type}]"]
-                if page:
-                    parts.append(f"p.{page}")
-                if color:
-                    parts.append(f"({color})")
-                line = " ".join(parts)
-                if text:
-                    line += f"\n  > {text}"
-                if comment:
-                    line += f"\n  Comment: {comment}"
-                all_annotations.append(line)
+                all_annotations.append(_format_annotation(ann))
 
         if not all_annotations:
             return f"No annotations found for item '{item_key}'."
         return f"Annotations for `{item_key}`:\n\n" + "\n\n".join(all_annotations)
     except Exception as e:
         return f"Error fetching annotations for '{item_key}': {e}"
+
+
+@mcp.tool(description=(
+    "Get a single annotation by its key. Useful when you already have the annotation key "
+    "from get_item_children or get_item_annotations. Returns the highlight text and comment."
+))
+def get_annotation(annotation_key: str) -> str:
+    try:
+        zot = _get_client()
+        ann = zot.item(annotation_key)
+        data = ann.get("data", {})
+        if data.get("itemType") != "annotation":
+            return f"Item '{annotation_key}' is not an annotation (type: {data.get('itemType')})."
+        return _format_annotation(ann)
+    except Exception as e:
+        return f"Error fetching annotation '{annotation_key}': {e}"
 
 
 # ---------------------------------------------------------------------------
