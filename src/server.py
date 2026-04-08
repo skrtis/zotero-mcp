@@ -114,7 +114,7 @@ def _format_items_list(items: list[dict]) -> str:
 def search_items(query: str, limit: int = 20) -> str:
     try:
         zot = _get_client()
-        items = zot.items(q=query, limit=min(limit, 100), itemType="-attachment || -note")
+        items = zot.items(q=query, limit=min(limit, 100), itemType="-attachment||-note")
         return _format_items_list(items)
     except Exception as e:
         return f"Error searching items: {e}"
@@ -127,7 +127,7 @@ def get_recent_items(limit: int = 10) -> str:
     try:
         zot = _get_client()
         items = zot.items(limit=min(limit, 50), sort="dateAdded", direction="desc",
-                          itemType="-attachment || -note")
+                          itemType="-attachment||-note")
         return _format_items_list(items)
     except Exception as e:
         return f"Error fetching recent items: {e}"
@@ -139,7 +139,7 @@ def get_recent_items(limit: int = 10) -> str:
 def search_by_tag(tag: str, limit: int = 20) -> str:
     try:
         zot = _get_client()
-        items = zot.items(tag=tag, limit=min(limit, 100), itemType="-attachment || -note")
+        items = zot.items(tag=tag, limit=min(limit, 100), itemType="-attachment||-note")
         return _format_items_list(items)
     except Exception as e:
         return f"Error searching by tag '{tag}': {e}"
@@ -354,7 +354,7 @@ def get_collection_items(collection_key: str, limit: int = 20) -> str:
     try:
         zot = _get_client()
         items = zot.collection_items(collection_key, limit=min(limit, 100),
-                                      itemType="-attachment || -note")
+                                      itemType="-attachment||-note")
         return _format_items_list(items)
     except Exception as e:
         return f"Error fetching items for collection '{collection_key}': {e}"
