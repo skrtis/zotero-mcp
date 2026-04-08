@@ -94,6 +94,11 @@ def _format_item(item: dict) -> str:
     return "\n".join(lines)
 
 
+def _is_regular_item(item: dict) -> bool:
+    """Return True for citable items — excludes attachments, notes, and annotations."""
+    return item.get("data", {}).get("itemType") not in ("attachment", "note", "annotation")
+
+
 def _format_items_list(items: list[dict]) -> str:
     if not items:
         return "No items found."
@@ -114,7 +119,8 @@ def _format_items_list(items: list[dict]) -> str:
 def search_items(query: str, limit: int = 20) -> str:
     try:
         zot = _get_client()
-        items = zot.items(q=query, limit=min(limit, 100), itemType="-attachment||-note")
+        items = zot.items(q=query, limit=100)
+        items = [i for i in items if _is_regular_item(i)][:min(limit, 100)]
         return _format_items_list(items)
     except Exception as e:
         return f"Error searching items: {e}"
@@ -126,8 +132,8 @@ def search_items(query: str, limit: int = 20) -> str:
 def get_recent_items(limit: int = 10) -> str:
     try:
         zot = _get_client()
-        items = zot.items(limit=min(limit, 50), sort="dateAdded", direction="desc",
-                          itemType="-attachment||-note")
+        items = zot.items(limit=100, sort="dateAdded", direction="desc")
+        items = [i for i in items if _is_regular_item(i)][:min(limit, 50)]
         return _format_items_list(items)
     except Exception as e:
         return f"Error fetching recent items: {e}"
@@ -139,7 +145,8 @@ def get_recent_items(limit: int = 10) -> str:
 def search_by_tag(tag: str, limit: int = 20) -> str:
     try:
         zot = _get_client()
-        items = zot.items(tag=tag, limit=min(limit, 100), itemType="-attachment||-note")
+        items = zot.items(tag=tag, limit=100)
+        items = [i for i in items if _is_regular_item(i)][:min(limit, 100)]
         return _format_items_list(items)
     except Exception as e:
         return f"Error searching by tag '{tag}': {e}"
@@ -154,7 +161,15 @@ def get_tags() -> str:
         tags = zot.tags()
         if not tags:
             return "No tags found in your library."
-        tag_list = sorted(t.get("tag", "") for t in tags if t.get("tag"))
+        tag_list = []
+        for t in tags:
+            if isinstance(t, dict):
+                name = t.get("tag", "")
+            else:
+                name = str(t)
+            if name:
+                tag_list.append(name)
+        tag_list = sorted(tag_list)
         return "Tags in your library:\n" + "\n".join(f"- {t}" for t in tag_list)
     except Exception as e:
         return f"Error fetching tags: {e}"
@@ -353,8 +368,8 @@ def get_collections() -> str:
 def get_collection_items(collection_key: str, limit: int = 20) -> str:
     try:
         zot = _get_client()
-        items = zot.collection_items(collection_key, limit=min(limit, 100),
-                                      itemType="-attachment||-note")
+        items = zot.collection_items(collection_key, limit=100)
+        items = [i for i in items if _is_regular_item(i)][:min(limit, 100)]
         return _format_items_list(items)
     except Exception as e:
         return f"Error fetching items for collection '{collection_key}': {e}"
