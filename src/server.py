@@ -119,7 +119,7 @@ def _format_items_list(items: list[dict]) -> str:
 def search_items(query: str, limit: int = 20) -> str:
     try:
         zot = _get_client()
-        items = zot.items(q=query, limit=min(limit, 100), itemType="-attachment -note")
+        items = zot.items(q=query, limit=min(limit, 100))
         items = [i for i in items if _is_regular_item(i)]
         return _format_items_list(items)
     except Exception as e:
@@ -132,8 +132,7 @@ def search_items(query: str, limit: int = 20) -> str:
 def get_recent_items(limit: int = 10) -> str:
     try:
         zot = _get_client()
-        items = zot.items(limit=min(limit, 50), sort="dateAdded", direction="desc",
-                          itemType="-attachment -note")
+        items = zot.items(limit=min(limit, 50), sort="dateAdded", direction="desc")
         items = [i for i in items if _is_regular_item(i)]
         return _format_items_list(items)
     except Exception as e:
@@ -146,7 +145,7 @@ def get_recent_items(limit: int = 10) -> str:
 def search_by_tag(tag: str, limit: int = 20) -> str:
     try:
         zot = _get_client()
-        items = zot.items(tag=tag, limit=min(limit, 100), itemType="-attachment -note")
+        items = zot.items(tag=tag, limit=min(limit, 100))
         items = [i for i in items if _is_regular_item(i)]
         return _format_items_list(items)
     except Exception as e:
@@ -369,8 +368,7 @@ def get_collections() -> str:
 def get_collection_items(collection_key: str, limit: int = 20) -> str:
     try:
         zot = _get_client()
-        items = zot.collection_items(collection_key, limit=min(limit, 100),
-                                      itemType="-attachment -note")
+        items = zot.collection_items(collection_key, limit=min(limit, 100))
         items = [i for i in items if _is_regular_item(i)]
         return _format_items_list(items)
     except Exception as e:
