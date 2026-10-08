@@ -18,3 +18,5 @@ services:
         value: user
       - key: ZOTERO_LOCAL
         value: "false"
+      - key: MCP_AUTH_TOKEN
+        sync: false

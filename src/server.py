@@ -5,6 +5,8 @@ Gives Poke access to your Zotero research library via the Model Context Protocol
 """
 
 import os
+import sys
+import hmac
 import json
 from typing import Optional
 from functools import lru_cache
@@ -12,6 +14,8 @@ from functools import lru_cache
 from fastmcp import FastMCP
 from pyzotero import zotero
 from dotenv import load_dotenv
+from starlette.middleware import Middleware
+from starlette.responses import JSONResponse
 
 load_dotenv()
 
@@ -106,6 +110,17 @@ def _format_items_list(items: list[dict]) -> str:
     for item in items:
         parts.append(_format_item(item))
     return "\n\n---\n\n".join(parts)
+
+
+def _split(value: Optional[str]) -> list[str]:
+    """Split a comma-separated argument into a list of non-empty, stripped strings."""
+    if not value:
+        return []
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def _tag_names(item: dict) -> list[str]:
+    return [t.get("tag", "") for t in item.get("data", {}).get("tags", []) if t.get("tag")]
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +388,7 @@ def get_collections() -> str:
         for col in sorted_cols:
             data = col["data"]
             path = get_path(data["key"])
-            count = data.get("numItems", "?")
+            count = col.get("meta", {}).get("numItems", "?")
             lines.append(f"- **{path}** (key: `{data['key']}`, items: {count})")
 
         return "\n".join(lines)
@@ -393,6 +408,41 @@ def get_collection_items(collection_key: str, limit: int = 20) -> str:
         return _format_items_list(items)
     except Exception as e:
         return f"Error fetching items for collection '{collection_key}': {e}"
+
+
+@mcp.tool(description=(
+    "List every item in the library (or in one collection) as one compact line each: "
+    "key | year | first author | title | tags | collections. No limit — pages through everything. "
+    "Use this to get an overview before reorganising tags or collections."
+))
+def list_library(collection_key: Optional[str] = None) -> str:
+    try:
+        zot = _get_client()
+        query = zot.collection_items(collection_key) if collection_key else zot.items()
+        items = [i for i in zot.everything(query) if _is_regular_item(i)]
+        if not items:
+            return "No items found."
+        col_names = {c["data"]["key"]: c["data"].get("name", "") for c in zot.everything(zot.collections())}
+
+        lines = [f"{len(items)} items (key | year | first author | title | tags | collections):"]
+        for item in sorted(items, key=lambda i: i.get("data", {}).get("title", "").lower()):
+            data = item.get("data", {})
+            creators = data.get("creators", [])
+            first = ""
+            if creators:
+                c = creators[0]
+                first = c.get("name") or c.get("lastName", "")
+                if len(creators) > 1:
+                    first += " et al."
+            year = (item.get("meta", {}).get("parsedDate") or data.get("date", ""))[:4]
+            cols = ", ".join(col_names.get(k, k) for k in data.get("collections", []))
+            lines.append(
+                f"{data.get('key', '')} | {year} | {first} | {data.get('title', 'Untitled')} | "
+                f"{', '.join(_tag_names(item)) or '-'} | {cols or '-'}"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error listing library: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +548,198 @@ def add_item_by_doi(doi: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tag editing tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool(description=(
+    "Add and/or remove tags on one or more items. item_keys, add and remove are "
+    "comma-separated strings, e.g. item_keys='ABC12345, DEF67890', add='gLM, to read', "
+    "remove='old tag'. Tags already present are not duplicated."
+))
+def update_item_tags(item_keys: str, add: Optional[str] = None, remove: Optional[str] = None) -> str:
+    try:
+        keys, to_add, to_remove = _split(item_keys), _split(add), set(_split(remove))
+        if not keys:
+            return "No item keys given."
+        if not to_add and not to_remove:
+            return "Nothing to do: give tags to add and/or remove."
+        zot = _get_client()
+        lines = []
+        for key in keys:
+            try:
+                item = zot.item(key)
+                before = _tag_names(item)
+                tags = [t for t in item["data"].get("tags", []) if t.get("tag") not in to_remove]
+                present = {t.get("tag") for t in tags}
+                tags += [{"tag": t} for t in to_add if t not in present]
+                after = [t["tag"] for t in tags]
+                if after == before:
+                    lines.append(f"- `{key}`: unchanged")
+                    continue
+                item["data"]["tags"] = tags
+                zot.update_item(item)
+                lines.append(f"- `{key}`: {', '.join(after) or '(no tags)'}")
+            except Exception as e:
+                lines.append(f"- `{key}`: error — {e}")
+        return "Tags updated:\n" + "\n".join(lines)
+    except Exception as e:
+        return f"Error updating tags: {e}"
+
+
+@mcp.tool(description=(
+    "Rename a tag on every item that carries it. If an item already has the new tag, "
+    "the two are merged (no duplicate)."
+))
+def rename_tag(old_tag: str, new_tag: str) -> str:
+    try:
+        old_tag, new_tag = old_tag.strip(), new_tag.strip()
+        if not old_tag or not new_tag or old_tag == new_tag:
+            return "Give two different, non-empty tag names."
+        zot = _get_client()
+        items = zot.everything(zot.items(tag=old_tag))
+        changed, errors = 0, []
+        for item in items:
+            try:
+                tags = [t for t in item["data"].get("tags", []) if t.get("tag") != old_tag]
+                if new_tag not in {t.get("tag") for t in tags}:
+                    tags.append({"tag": new_tag})
+                item["data"]["tags"] = tags
+                zot.update_item(item)
+                changed += 1
+            except Exception as e:
+                errors.append(f"`{item.get('key', '?')}`: {e}")
+        msg = f"Renamed '{old_tag}' → '{new_tag}' on {changed} of {len(items)} items."
+        return msg + ("\nErrors:\n" + "\n".join(errors) if errors else "")
+    except Exception as e:
+        return f"Error renaming tag '{old_tag}': {e}"
+
+
+@mcp.tool(description=(
+    "Delete tags from the whole library: each tag is removed from every item that has it. "
+    "The items themselves are not deleted. tags is a comma-separated string (up to 50)."
+))
+def delete_tags(tags: str) -> str:
+    try:
+        names = _split(tags)
+        if not names:
+            return "No tags given."
+        zot = _get_client()
+        zot.delete_tags(*names)
+        return f"Deleted {len(names)} tag(s) from the library: {', '.join(names)}"
+    except Exception as e:
+        return f"Error deleting tags: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Collection editing tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool(description=(
+    "Create a collection. Pass parent_key to make it a subcollection of an existing collection."
+))
+def create_collection(name: str, parent_key: Optional[str] = None) -> str:
+    try:
+        zot = _get_client()
+        payload = {"name": name.strip()}
+        if parent_key:
+            payload["parentCollection"] = parent_key.strip()
+        result = zot.create_collections([payload])
+        if result and result.get("successful"):
+            created = list(result["successful"].values())[0]
+            key = created.get("key") or created.get("data", {}).get("key", "")
+            return f"Collection '{name}' created (key: `{key}`)."
+        return f"Collection creation returned: {json.dumps(result)}"
+    except Exception as e:
+        return f"Error creating collection '{name}': {e}"
+
+
+@mcp.tool(description=(
+    "Rename and/or move a collection. new_name renames it; new_parent_key moves it under "
+    "another collection, or pass new_parent_key='top' to move it to the top level."
+))
+def update_collection(
+    collection_key: str,
+    new_name: Optional[str] = None,
+    new_parent_key: Optional[str] = None,
+) -> str:
+    try:
+        if not new_name and not new_parent_key:
+            return "Nothing to do: give new_name and/or new_parent_key."
+        zot = _get_client()
+        col = zot.collection(collection_key)
+        if new_name:
+            col["data"]["name"] = new_name.strip()
+        if new_parent_key:
+            parent = new_parent_key.strip()
+            col["data"]["parentCollection"] = False if parent.lower() == "top" else parent
+        zot.update_collection(col)
+        return f"Collection `{collection_key}` updated: name '{col['data']['name']}', parent {col['data'].get('parentCollection') or 'top level'}."
+    except Exception as e:
+        return f"Error updating collection '{collection_key}': {e}"
+
+
+@mcp.tool(description=(
+    "Delete a collection. Its items stay in the library (and in any other collections); "
+    "only the collection is removed. Subcollections are deleted with it."
+))
+def delete_collection(collection_key: str) -> str:
+    try:
+        zot = _get_client()
+        col = zot.collection(collection_key)
+        zot.delete_collection(col)
+        return f"Collection '{col['data'].get('name', collection_key)}' (`{collection_key}`) deleted."
+    except Exception as e:
+        return f"Error deleting collection '{collection_key}': {e}"
+
+
+def _change_membership(collection_key: str, item_keys: str, adding: bool) -> str:
+    keys = _split(item_keys)
+    if not keys:
+        return "No item keys given."
+    zot = _get_client()
+    lines = []
+    for key in keys:
+        try:
+            item = zot.item(key)
+            current = item["data"].get("collections", [])
+            if adding and collection_key in current:
+                lines.append(f"- `{key}`: already in collection")
+            elif not adding and collection_key not in current:
+                lines.append(f"- `{key}`: not in collection")
+            elif adding:
+                zot.addto_collection(collection_key, item)
+                lines.append(f"- `{key}`: added")
+            else:
+                zot.deletefrom_collection(collection_key, item)
+                lines.append(f"- `{key}`: removed")
+        except Exception as e:
+            lines.append(f"- `{key}`: error — {e}")
+    return f"Collection `{collection_key}`:\n" + "\n".join(lines)
+
+
+@mcp.tool(description=(
+    "Add one or more items to a collection. item_keys is a comma-separated string. "
+    "Items keep their other collections."
+))
+def add_to_collection(collection_key: str, item_keys: str) -> str:
+    try:
+        return _change_membership(collection_key, item_keys, adding=True)
+    except Exception as e:
+        return f"Error adding to collection '{collection_key}': {e}"
+
+
+@mcp.tool(description=(
+    "Remove one or more items from a collection. The items stay in the library and in any "
+    "other collections. item_keys is a comma-separated string."
+))
+def remove_from_collection(collection_key: str, item_keys: str) -> str:
+    try:
+        return _change_membership(collection_key, item_keys, adding=False)
+    except Exception as e:
+        return f"Error removing from collection '{collection_key}': {e}"
+
+
+# ---------------------------------------------------------------------------
 # Library info
 # ---------------------------------------------------------------------------
 
@@ -533,18 +775,45 @@ def get_library_info() -> str:
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+class BearerAuthMiddleware:
+    """Reject any HTTP request whose Authorization header is not 'Bearer <MCP_AUTH_TOKEN>'."""
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.expected = f"Bearer {token}".encode()
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            supplied = dict(scope.get("headers", [])).get(b"authorization", b"")
+            if not hmac.compare_digest(supplied, self.expected):
+                response = JSONResponse({"error": "unauthorized"}, status_code=401)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     host = "0.0.0.0"
+
+    token = os.environ.get("MCP_AUTH_TOKEN", "")
+    allow_no_auth = os.environ.get("MCP_ALLOW_NO_AUTH", "false").lower() == "true"
+    if not token and not allow_no_auth:
+        sys.exit(
+            "MCP_AUTH_TOKEN is not set. Set it to a long random string, or set "
+            "MCP_ALLOW_NO_AUTH=true to run without authentication (local testing only)."
+        )
 
     print(f"Starting Zotero MCP server on {host}:{port}")
     print(f"  Library ID:   {os.environ.get('ZOTERO_LIBRARY_ID', 'not set')}")
     print(f"  Library type: {os.environ.get('ZOTERO_LIBRARY_TYPE', 'user')}")
     print(f"  Local mode:   {os.environ.get('ZOTERO_LOCAL', 'false')}")
+    print(f"  Auth:         {'bearer token required' if token else 'NONE (MCP_ALLOW_NO_AUTH=true)'}")
 
     mcp.run(
         transport="http",
         host=host,
         port=port,
         stateless_http=True,
+        middleware=[Middleware(BearerAuthMiddleware, token=token)] if token else [],
     )
